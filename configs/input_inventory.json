@@ -1,0 +1,119 @@
+[
+  {
+    "image": "D:\\Documents\\ChatGPT\\New project\\dataset\\org\\002.png",
+    "mask": "D:\\Documents\\ChatGPT\\New project\\dataset\\label\\002.png",
+    "size": [
+      5472,
+      3648
+    ],
+    "mask_values": [
+      0,
+      255
+    ],
+    "white_fraction": 0.03224339460218529
+  },
+  {
+    "image": "D:\\Documents\\ChatGPT\\New project\\dataset\\org\\008.png",
+    "mask": "D:\\Documents\\ChatGPT\\New project\\dataset\\label\\008.png",
+    "size": [
+      5472,
+      3648
+    ],
+    "mask_values": [
+      0,
+      255
+    ],
+    "white_fraction": 0.02810570319713758
+  },
+  {
+    "image": "D:\\Documents\\ChatGPT\\New project\\dataset\\org\\040.png",
+    "mask": "D:\\Documents\\ChatGPT\\New project\\dataset\\label\\040.png",
+    "size": [
+      5472,
+      3648
+    ],
+    "mask_values": [
+      0,
+      255
+    ],
+    "white_fraction": 0.0027087160632758797
+  },
+  {
+    "image": "D:\\Documents\\ChatGPT\\New project\\dataset\\org\\080.png",
+    "mask": "D:\\Documents\\ChatGPT\\New project\\dataset\\label\\080.png",
+    "size": [
+      5472,
+      3648
+    ],
+    "mask_values": [
+      0,
+      255
+    ],
+    "white_fraction": 0.039054885477582846
+  },
+  {
+    "image": "D:\\Documents\\ChatGPT\\New project\\dataset\\org\\228.png",
+    "mask": "D:\\Documents\\ChatGPT\\New project\\dataset\\label\\228.png",
+    "size": [
+      5472,
+      3648
+    ],
+    "mask_values": [
+      0,
+      255
+    ],
+    "white_fraction": 0.008894263138658048
+  },
+  {
+    "image": "D:\\Documents\\ChatGPT\\New project\\dataset\\org\\425.png",
+    "mask": "D:\\Documents\\ChatGPT\\New project\\dataset\\label\\425.png",
+    "size": [
+      5472,
+      3648
+    ],
+    "mask_values": [
+      0,
+      255
+    ],
+    "white_fraction": 0.01372487608366677
+  },
+  {
+    "image": "D:\\Documents\\ChatGPT\\New project\\dataset\\org\\605.png",
+    "mask": "D:\\Documents\\ChatGPT\\New project\\dataset\\label\\605.png",
+    "size": [
+      5472,
+      3648
+    ],
+    "mask_values": [
+      0,
+      255
+    ],
+    "white_fraction": 0.04301924630655586
+  },
+  {
+    "image": "D:\\Documents\\ChatGPT\\New project\\dataset\\org\\607.png",
+    "mask": "D:\\Documents\\ChatGPT\\New project\\dataset\\label\\607.png",
+    "size": [
+      5472,
+      3648
+    ],
+    "mask_values": [
+      0,
+      255
+    ],
+    "white_fraction": 0.02398940258861701
+  },
+  {
+    "image": "D:\\Documents\\ChatGPT\\New project\\dataset\\org\\622.png",
+    "mask": "D:\\Documents\\ChatGPT\\New project\\dataset\\label\\622.png",
+    "size": [
+      5472,
+      3648
+    ],
+    "mask_values": [
+      0,
+      255
+    ],
+    "white_fraction": 0.01460290065212373
+  }
+]

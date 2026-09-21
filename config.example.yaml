@@ -1,0 +1,22 @@
+# Paths are relative to this file. Use your existing PaddleSeg environment.
+model_config: /path/to/PaddleSeg/configs/root_segformer_b2.yml
+checkpoint: /path/to/best_model/model.pdparams
+train_manifest: data/train.jsonl
+val_manifest: data/val.jsonl
+unlabeled_dir: data/unlabeled
+workdir: runs/experiment_001
+device: gpu
+seed: 42
+rounds: 3
+iters: 1000
+batch_size: 2
+learning_rate: 0.00001
+root_confidence: 0.95
+consistency: 0.95
+pixel_confidence: 0.9
+min_coverage: 0.5
+min_root_pixels: 20
+max_pseudo_ratio: 1.0
+min_delta: 0.001
+auto_train: true
+auto_train_dice: 0.85

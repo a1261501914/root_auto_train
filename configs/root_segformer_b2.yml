@@ -1,0 +1,65 @@
+# 从用户原始配置生成；保留模型、增强、损失和滑窗参数。
+batch_size: 4
+iters: 130000
+train_dataset:
+  type: Dataset
+  dataset_root: .
+  transforms:
+  - type: ResizeStepScaling
+    min_scale_factor: 0.5
+    max_scale_factor: 2.0
+    scale_step_size: 0.25
+  - type: RandomPaddingCrop
+    crop_size:
+    - 512
+    - 512
+  - type: RandomHorizontalFlip
+  - type: RandomDistort
+    brightness_range: 0.4
+    contrast_range: 0.4
+    saturation_range: 0.4
+  - type: Normalize
+  mode: train
+  num_classes: 2
+  ignore_index: 255
+  separator: "\t"
+  train_path: data/prepared/train.txt
+val_dataset:
+  type: Dataset
+  dataset_root: .
+  transforms:
+  - type: Normalize
+  mode: val
+  num_classes: 2
+  ignore_index: 255
+  separator: "\t"
+  val_path: data/prepared/val.txt
+model:
+  type: SegFormer
+  backbone:
+    type: MixVisionTransformer_B2
+    pretrained: null
+  embedding_dim: 768
+  num_classes: 2
+optimizer:
+  type: AdamW
+  beta1: 0.9
+  beta2: 0.999
+  weight_decay: 0.01
+lr_scheduler:
+  type: PolynomialDecay
+  learning_rate: 0.0006
+  power: 1
+loss:
+  types:
+  - type: CrossEntropyLoss
+  coef:
+  - 1
+test_config:
+  is_slide: true
+  crop_size:
+  - 512
+  - 512
+  stride:
+  - 400
+  - 400
