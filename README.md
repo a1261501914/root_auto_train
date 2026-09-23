@@ -37,7 +37,7 @@ python -m root_self_train auto config.yaml
 
 ## 环境
 
-优先在你原来能运行 SegFormer-B2 的训练环境安装本项目依赖：
+优先在原有可运行 SegFormer-B2 的训练环境安装本项目依赖：
 
 ```bash
 pip install -r requirements.txt
@@ -81,6 +81,6 @@ python -m unittest discover -s tests -v
 ```
 
 包含指标与忽略像素、伪标签门控、晋级边界，以及模拟模型驱动的完整两轮编排测试。模拟测试没有训练神经网络。
-当前交付未使用真实 SegFormer 权重或 GPU 执行训练，PaddleSeg 接口仍需在你的实际环境做一轮小规模联调。
+当前交付未使用真实 SegFormer 权重或 GPU 执行训练，PaddleSeg 接口仍需在实际训练环境做一轮小规模联调。
 
 下一步接入需要：原始模型 YAML（及其 `_base_` 文件）、`model.pdparams`、少量训练/验证/未标注图片和对应人工 mask，以及 Paddle/PaddleSeg/CUDA 版本。建议先把 `rounds` 设为 1、`iters` 设为 10 完成冒烟测试，再正式训练。
