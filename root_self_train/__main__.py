@@ -5,6 +5,12 @@ import math
 import subprocess
 import sys
 from pathlib import Path
+from .dependencies import ensure_imports
+try:
+    ensure_imports(('numpy', 'yaml', 'PIL'))
+except RuntimeError as exc:
+    print(f'环境准备未完成：{exc}', file=sys.stderr)
+    raise SystemExit(1) from None
 import numpy as np
 import yaml
 from PIL import Image
@@ -192,9 +198,9 @@ def run(cfg, check=False, workdir=None):
         del predictor
         import gc
         gc.collect()
-        if cfg['device'].startswith('gpu'):
-            import paddle
-            paddle.device.cuda.empty_cache()
+        if cfg['device'].startswith(('gpu', 'cuda')):
+            import torch
+            torch.cuda.empty_cache()
         # 先释放父进程推理缓存；独立子进程训练，退出后释放优化器与显存。
         job = dict(cfg=cfg, teacher=str(teacher), manifest=str(manifest), output=str(folder / 'student'))
         write_json(folder / 'job.json', job)
@@ -205,7 +211,7 @@ def run(cfg, check=False, workdir=None):
         except subprocess.CalledProcessError:
             write_json(folder / 'result.json', dict(status='training_failed', retained_teacher=str(teacher)))
             raise
-        candidate = folder / 'student' / f"iter_{cfg['iters']}" / 'model.pdparams'
+        candidate = folder / 'student' / f"iter_{cfg['iters']}" / 'model.pt'
         predictor = Predictor(cfg['model_config'], candidate, cfg['device'])
         new_score = evaluate(predictor, val)
         promote = promoted(new_score, score, cfg['min_delta'])
@@ -226,60 +232,37 @@ def run(cfg, check=False, workdir=None):
 
 
 def auto(cfg):
-    """One-command orchestrator: predict, evaluate, conditionally self-train, then finalize."""
-    # Reuse run's validation logic without loading Paddle or creating an experiment directory.
-    run(cfg, check=True)
-    root = Path(cfg['workdir'])
-    root.mkdir(parents=True, exist_ok=False)
-    write_json(root / 'config.json', cfg)
-    from .backend import Predictor
-    images = input_images(cfg['unlabeled_dir'])
-    if cfg.get('unlabeled_manifest'):
-        manifest_path = Path(cfg['unlabeled_manifest'])
-        images = [(manifest_path.parent / json.loads(line)['image']).resolve()
-                  for line in manifest_path.read_text(encoding='utf-8-sig').splitlines() if line.strip()]
-    predictor = Predictor(cfg['model_config'], cfg['checkpoint'], cfg['device'])
-    baseline_prediction = root / 'predictions_baseline'
-    predict_directory(predictor, images, baseline_prediction)
-    val = read_pairs(cfg['val_manifest'])
-    baseline = evaluate_detailed(predictor, val)
-    write_json(root / 'evaluation_baseline.json', baseline)
-    report_markdown(root / 'evaluation_baseline.md', 'Baseline evaluation', cfg['checkpoint'], baseline)
-    target = cfg['auto_train_dice']
-    need_train = cfg['auto_train'] and baseline['metrics']['dice'] < target
-    final_checkpoint = cfg['checkpoint']
-    status = 'accepted_baseline'
-    if need_train:
-        train_cfg = dict(cfg, workdir=str(root / 'self_train'))
-        run(train_cfg)
-        best = json.loads((root / 'self_train' / 'best.json').read_text(encoding='utf-8'))
-        final_checkpoint = best['checkpoint']
-        status = 'self_trained_and_selected'
-    elif not cfg['auto_train']:
-        status = 'baseline_below_target_training_disabled' if baseline['metrics']['dice'] < target else status
-    del predictor
-    predictor = Predictor(cfg['model_config'], final_checkpoint, cfg['device'])
-    final_prediction = root / 'predictions_final'
-    predict_directory(predictor, images, final_prediction)
-    final = evaluate_detailed(predictor, val)
-    write_json(root / 'evaluation_final.json', final)
-    report_markdown(root / 'evaluation_final.md', 'Final evaluation', final_checkpoint, final)
-    summary = dict(status=status, target_dice=target, baseline=baseline['metrics'],
-                   final=final['metrics'], checkpoint=final_checkpoint,
-                   prediction_dir=str(final_prediction), evaluation=str(root / 'evaluation_final.md'))
-    write_json(root / 'auto_summary.json', summary)
+    """Coordinate segmentation, evaluation and training specialists locally."""
+    from .specialists import Coordinator
+    summary = Coordinator().run_auto(cfg)
     print(json.dumps(summary, ensure_ascii=False), flush=True)
 
 
 def main():
     """check 只检查数据，run 启动闭环，worker 是内部单轮训练入口。"""
     parser = argparse.ArgumentParser(description='Root segmentation automatic prediction and self-training')
-    parser.add_argument('command', choices=['check', 'predict', 'evaluate', 'auto', 'run', 'worker'])
+    parser.add_argument('command', choices=['check', 'predict', 'evaluate', 'auto', 'run', 'worker', 'ask'])
     parser.add_argument('config')
+    parser.add_argument('instruction', nargs='?', help='ask 的自然语言指令；省略时进入连续对话')
+    parser.add_argument('--dry-run', action='store_true', help='ask 只解析并显示计划，不加载分割模型')
     parser.add_argument('--input-dir', help='image directory for predict; defaults to config.unlabeled_dir')
     parser.add_argument('--output', help='output directory; must not already exist')
     parser.add_argument('--threshold', type=float, default=.5)
     args = parser.parse_args()
+    if args.command != 'ask' and (args.instruction is not None or args.dry_run):
+        parser.error('instruction 和 --dry-run 仅适用于 ask')
+    if args.command == 'ask':
+        if args.input_dir or args.output or args.threshold != .5:
+            parser.error('ask 的路径和要求请写入自然语言指令，不使用 --input-dir/--output/--threshold')
+        from .agent import ask, chat
+        try:
+            if args.instruction is None:
+                chat(args.config, dry_run=args.dry_run)
+            else:
+                ask(args.config, args.instruction, dry_run=args.dry_run)
+        except (ValueError, RuntimeError, OSError) as exc:
+            parser.exit(1, f'任务失败：{exc}\n')
+        return
     if args.command == 'worker':
         import json
         from .backend import train

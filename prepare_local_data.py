@@ -62,7 +62,7 @@ def main():
         val=[p['image'] for p in pairs['val']], unlabeled=len(selected), excluded=excluded,
         label_mapping={'0':0, '255':1}, note='Small provisional split for integration; not a final test set.'))
     cfg = yaml.safe_load((root/'config.example.yaml').read_text())
-    cfg.update(model_config='configs/root_segformer_b2.yml', checkpoint='root_get/model.pdparams',
+    cfg.update(model_config='configs/root_segformer_b2.yml', checkpoint='model/model.pt',
         train_manifest='data/prepared/train.jsonl', val_manifest='data/prepared/val.jsonl',
         unlabeled_dir=str(external), unlabeled_manifest='data/prepared/unlabeled_smoke.jsonl',
         workdir='runs/local_smoke_001', rounds=1, iters=10, batch_size=1, device=args.device)

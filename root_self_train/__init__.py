@@ -1,1 +1,1 @@
-"""Minimal PaddleSeg root self-training pipeline."""
+"""PyTorch root segmentation and self-training with Deep Agents orchestration."""

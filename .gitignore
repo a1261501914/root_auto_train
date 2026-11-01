@@ -1,13 +1,17 @@
 __pycache__/
 *.pyc
 .venv/
+.venv-deepagents/
 data/
 runs/
 *.pdparams
+*.pt
+*.pth
 *.pdopt
 
 # Local configuration and generated artifacts
 config.local.yaml
+config.yaml
 remote_results/
 $dest/
 project_upload.zip

@@ -1,123 +1,143 @@
-"""PaddleSeg 2.8 适配层；仅在真实推理或训练时导入 Paddle。"""
+"""PyTorch inference and fine-tuning; no Paddle runtime dependency."""
+import random
 from pathlib import Path
 import numpy as np
-from PIL import Image
+import yaml
+from PIL import Image, ImageEnhance, ImageOps
+
+
+def select_device(torch, device):
+    name = 'cuda' + str(device)[3:] if str(device).startswith('gpu') else str(device)
+    resolved = torch.device(name)
+    if resolved.type not in {'cpu', 'cuda'}:
+        raise ValueError('设备仅支持 cpu、gpu/cuda 或 gpu:0/cuda:0')
+    if resolved.type == 'cuda' and (not torch.cuda.is_available() or (resolved.index or 0) >= torch.cuda.device_count()):
+        raise RuntimeError('当前 PyTorch 无法使用指定 GPU，请检查 CUDA 版 PyTorch 和驱动；可显式设置 device: cpu')
+    return resolved
 
 
 class Predictor:
-    """加载完整分割权重，并输出恢复至原图尺寸的根系概率图。"""
     def __init__(self, config, checkpoint, device):
-        import paddle
-        from paddleseg.cvlibs import Config, SegBuilder
-        from paddleseg.transforms import Compose
-        from paddleseg.cvlibs import manager
-        self.paddle = paddle
-        paddle.set_device(device)
-        cfg = Config(config)
-        self.test_config = cfg.dic.get('test_config', {})
-        def clear_pretrained(obj):
-            if isinstance(obj, dict):
-                for key, value in obj.items():
-                    if key == 'pretrained':
-                        obj[key] = None
-                    else:
-                        clear_pretrained(value)
-            elif isinstance(obj, list):
-                for value in obj:
-                    clear_pretrained(value)
-        # 已有完整 Teacher 权重，禁用配置中的预训练加载，避免额外下载或覆盖。
-        clear_pretrained(cfg.dic['model'])
-        self.model = SegBuilder(cfg).model
-        state = paddle.load(str(checkpoint))
-        expected = self.model.state_dict()
-        # 严格核对参数名与形状，防止配置不匹配时仅加载部分权重而继续运行。
-        if set(state) != set(expected) or any(list(state[k].shape) != list(expected[k].shape) for k in expected):
-            raise ValueError('Checkpoint keys/shapes do not exactly match the model config')
-        self.model.set_state_dict(state)
-        self.model.eval()
-        transforms = cfg.dic['val_dataset']['transforms']
-        # 当前通过缩放恢复原尺寸，尚不能逆转裁剪或填充，因此限制验证变换。
-        allowed = {'Resize', 'ResizeByLong', 'LimitLong', 'Normalize'}
-        if any(t['type'] not in allowed for t in transforms):
-            raise ValueError('MVP validation transforms support only Resize/ResizeByLong/LimitLong/Normalize')
-        self.transform = Compose([manager.TRANSFORMS[t['type']](**{k:v for k,v in t.items() if k != 'type'}) for t in transforms])
+        if Path(checkpoint).suffix == '.pdparams':
+            raise ValueError('请先转换旧权重：python -m root_self_train.convert_weights model/model.pdparams model/model.pt；然后修改 checkpoint 为 model/model.pt')
+        from .dependencies import ensure_imports
+        ensure_imports(('torch',), device)
+        import torch
+        from .torch_model import SegFormerB2
+        self.torch, self.device = torch, select_device(torch, device)
+        self.cfg = yaml.safe_load(Path(config).read_text(encoding='utf-8'))
+        model = self.cfg['model']
+        if model['type'] != 'SegFormer' or model['backbone']['type'] != 'MixVisionTransformer_B2' or model['num_classes'] != 2:
+            raise ValueError('当前 PyTorch 后端仅支持二分类 SegFormer-B2')
+        transforms = self.cfg['val_dataset']['transforms']
+        if len(transforms) != 1 or transforms[0]['type'] != 'Normalize':
+            raise ValueError('PyTorch 验证变换当前仅支持 Normalize')
+        norm = transforms[0]
+        self.mean = np.array(norm.get('mean', [.5]*3), dtype=np.float32)[:, None, None]
+        self.std = np.array(norm.get('std', [.5]*3), dtype=np.float32)[:, None, None]
+        if self.mean.shape != (3, 1, 1) or self.std.shape != (3, 1, 1) or not (self.std > 0).all():
+            raise ValueError('Normalize mean/std 必须为三个通道，std 必须大于零')
+        self.test_config = self.cfg.get('test_config', {})
+        self.model = SegFormerB2(model['embedding_dim'])
+        self.model.load_state_dict(torch.load(checkpoint, map_location='cpu', weights_only=True), strict=True)
+        self.model.to(self.device).eval()
+
+    def normalize(self, image):
+        return (np.asarray(image, dtype=np.float32).transpose(2, 0, 1) / 255 - self.mean) / self.std
 
     def predict(self, image, flip=False):
-        """返回 H×W 根概率；flip=True 时先翻图推理，再将概率图翻回。"""
-        import cv2
-        p = self.paddle
-        arr = cv2.imread(str(image))
-        if arr is None:
-            raise ValueError(f'Cannot read image: {image}')
-        height, width = arr.shape[:2]
+        from .tiling import slide_logits
+        torch = self.torch
+        with Image.open(image) as source:
+            arr = self.normalize(source.convert('RGB'))
         if flip:
-            arr = arr[:, ::-1].copy()
-        # OpenCV 读取 BGR，Compose 默认转 RGB，并沿用原配置的归一化。
-        data = self.transform({'img': arr.astype('float32')})
-        with p.no_grad():
-            # 增加 batch 维度得到 NCHW，取模型输出列表中的主分割 logits。
+            arr = arr[:, :, ::-1].copy()
+        def tile(chw):
+            h, w = chw.shape[1:]
+            x = torch.from_numpy(chw.copy()).unsqueeze(0).to(self.device)
+            x = torch.nn.functional.pad(x, (0, max(0, 32-w), 0, max(0, 32-h)))
+            return self.model(x)[0, :, :h, :w].cpu().numpy()
+        with torch.inference_mode():
             if self.test_config.get('is_slide', False):
-                from .tiling import slide_logits
-                def predict_tile(tile):
-                    logits = self.model(p.to_tensor(tile[None].copy()))[0]
-                    logits = p.nn.functional.interpolate(logits, size=list(tile.shape[1:]),
-                                                         mode='bilinear', align_corners=False)
-                    return logits[0].numpy()
-                logits = slide_logits(data['img'], predict_tile,
-                                      self.test_config['crop_size'], self.test_config['stride'])
-                # 大图拼接和 softmax 留在 CPU，避免整幅双通道图长期占用显存。
-                margin = logits[1] - logits[0]
-                prob = np.exp(-np.logaddexp(0, -margin))
-                if prob.shape != (height, width):
-                    # 本配置只有 Normalize，不会走此分支；缩放配置需在 logits 上恢复尺寸。
-                    logits = np.stack([cv2.resize(v, (width, height)) for v in logits])
-                    prob = np.exp(-np.logaddexp(0, logits[0]-logits[1]))
-                return prob[:, ::-1].copy() if flip else prob
-            output = self.model(p.to_tensor(data['img'][None]))[0]
-            if output.shape[1] != 2:
-                raise ValueError('MVP requires two output channels: background=0, root=1')
-            # 先恢复 logits 空间尺寸，再沿类别维 softmax，取类别 1（根系）。
-            output = p.nn.functional.interpolate(output, size=[height, width], mode='bilinear', align_corners=False)
-            prob = p.nn.functional.softmax(output, axis=1)[0, 1].numpy()
+                logits = slide_logits(arr, tile, self.test_config['crop_size'], self.test_config['stride'])
+            else:
+                logits = tile(arr)
+        prob = np.exp(-np.logaddexp(0, logits[0] - logits[1]))
         return prob[:, ::-1].copy() if flip else prob
 
 
+def training_sample(image, mask, transforms, normalize):
+    with Image.open(image) as source, Image.open(mask) as target:
+        image, mask = source.convert('RGB'), target.copy()
+    for transform in transforms:
+        kind = transform['type']
+        if kind == 'ResizeStepScaling':
+            lo, hi, step = transform['min_scale_factor'], transform['max_scale_factor'], transform.get('scale_step_size', .25)
+            scale = random.choice(np.arange(lo, hi + 1e-6, step)) if step else random.uniform(lo, hi)
+            size = tuple(max(1, int(v * scale)) for v in image.size)
+            image, mask = image.resize(size, Image.Resampling.BILINEAR), mask.resize(size, Image.Resampling.NEAREST)
+        elif kind == 'RandomPaddingCrop':
+            w, h = transform['crop_size']
+            pad = (0, 0, max(0, w-image.width), max(0, h-image.height))
+            image, mask = ImageOps.expand(image, pad, fill=(127, 127, 127)), ImageOps.expand(mask, pad, fill=255)
+            x, y = random.randint(0, image.width-w), random.randint(0, image.height-h)
+            box = (x, y, x+w, y+h)
+            image, mask = image.crop(box), mask.crop(box)
+        elif kind == 'RandomHorizontalFlip':
+            if random.random() < transform.get('prob', .5):
+                image, mask = ImageOps.mirror(image), ImageOps.mirror(mask)
+        elif kind == 'RandomDistort':
+            for key, enhancement in [('brightness_range', ImageEnhance.Brightness), ('contrast_range', ImageEnhance.Contrast), ('saturation_range', ImageEnhance.Color)]:
+                magnitude = transform.get(key, 0)
+                image = enhancement(image).enhance(random.uniform(1-magnitude, 1+magnitude))
+        elif kind != 'Normalize':
+            raise ValueError(f'不支持训练变换：{kind}')
+    return normalize(image), np.array(mask, dtype=np.int64)
+
+
 def train(config, checkpoint, output, manifest, options):
-    """单轮微调：只继承 Teacher 参数，优化器和训练步数重新初始化。"""
-    import paddle
-    from paddleseg.cvlibs import Config, SegBuilder
-    from paddleseg.core import train as seg_train
-    from paddleseg.utils import utils
-    utils.set_seed(options['seed'])
     predictor = Predictor(config, checkpoint, options['device'])
-    cfg = Config(config, learning_rate=options['learning_rate'],
-                 iters=options['iters'], batch_size=options['batch_size'])
-    if cfg.dic['train_dataset']['type'] != 'Dataset':
-        raise ValueError('MVP requires the generic PaddleSeg Dataset for training')
-    # 替换为本轮人工数据与伪标签清单，保留原配置增强；255 为忽略像素。
-    cfg.dic['train_dataset'].update(type='Dataset', dataset_root=str(Path(manifest).parent),
-        train_path=str(manifest), num_classes=2, ignore_index=255, mode='train', separator='\t')
-    def clear(obj):
-        if isinstance(obj, dict):
-            for k, v in obj.items():
-                if k == 'pretrained':
-                    obj[k] = None
-                else:
-                    clear(v)
-        elif isinstance(obj, list):
-            for v in obj:
-                clear(v)
-    clear(cfg.dic['model'])
-    builder = SegBuilder(cfg)
-    # 在构建优化器前加载 Teacher；不传 resume_model，不恢复旧优化器状态。
-    builder.model.set_state_dict(predictor.model.state_dict())
-    del predictor
-    seg_train(builder.model, builder.train_dataset, optimizer=builder.optimizer,
-              losses=builder.loss, save_dir=str(output), iters=options['iters'],
-              batch_size=options['batch_size'], num_workers=0,
-              save_interval=options['iters'], log_iters=10, keep_checkpoint_max=1)
-    # 基础版统一评估最后一步 checkpoint，由外层固定验证集决定是否晋级。
-    checkpoint = Path(output) / f"iter_{options['iters']}" / 'model.pdparams'
-    if not checkpoint.is_file():
-        raise RuntimeError(f'Training did not produce expected checkpoint: {checkpoint}')
-    return checkpoint
+    torch, model = predictor.torch, predictor.model
+    seed = options['seed']
+    torch.manual_seed(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    pairs = [line.split('\t') for line in Path(manifest).read_text(encoding='utf-8').splitlines() if line.strip()]
+    if not pairs or any(len(pair) != 2 for pair in pairs):
+        raise ValueError('训练清单必须包含制表符分隔的图像与掩膜路径')
+    transforms = predictor.cfg['train_dataset']['transforms']
+    optimizer_config = predictor.cfg['optimizer']
+    scheduler = predictor.cfg['lr_scheduler']
+    loss_config = predictor.cfg['loss']
+    if optimizer_config['type'] != 'AdamW' or scheduler['type'] != 'PolynomialDecay' or scheduler.get('power', 1) != 1:
+        raise ValueError('当前训练仅支持 AdamW + PolynomialDecay(power=1)')
+    if loss_config != {'types': [{'type': 'CrossEntropyLoss'}], 'coef': [1]}:
+        raise ValueError('当前训练仅支持单个 CrossEntropyLoss，ignore_index=255')
+    norms = [item for item in transforms if item['type'] == 'Normalize']
+    if norms != predictor.cfg['val_dataset']['transforms'] or transforms[-1]['type'] != 'Normalize':
+        raise ValueError('训练需以与验证相同的 Normalize 结束')
+    model.train()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=options['learning_rate'],
+                                 betas=(optimizer_config.get('beta1', .9), optimizer_config.get('beta2', .999)),
+                                 weight_decay=optimizer_config.get('weight_decay', .01))
+    for step in range(options['iters']):
+        samples = [training_sample(*random.choice(pairs), transforms, predictor.normalize) for _ in range(options['batch_size'])]
+        images = torch.from_numpy(np.stack([s[0] for s in samples])).to(predictor.device)
+        masks = torch.from_numpy(np.stack([s[1] for s in samples])).to(predictor.device)
+        if not (masks != 255).any():
+            raise ValueError('训练 batch 全为忽略像素，请检查标签或裁剪配置')
+        optimizer.zero_grad(set_to_none=True)
+        loss = torch.nn.functional.cross_entropy(model(images), masks, ignore_index=255)
+        if not torch.isfinite(loss):
+            raise RuntimeError('训练损失非有限值，停止并保留原模型')
+        loss.backward()
+        optimizer.step()
+        for group in optimizer.param_groups:
+            group['lr'] = options['learning_rate'] * (1 - (step+1)/options['iters'])
+        if step % 10 == 0 or step + 1 == options['iters']:
+            print(f'iter={step+1} loss={loss.item():.6f}', flush=True)
+    destination = Path(output) / f"iter_{options['iters']}" / 'model.pt'
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open('xb') as stream:
+        torch.save({k: v.cpu() for k, v in model.state_dict().items()}, stream)
+    return destination

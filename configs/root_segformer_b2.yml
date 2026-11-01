@@ -1,4 +1,4 @@
-# 从用户原始配置生成；保留模型、增强、损失和滑窗参数。
+# PyTorch SegFormer-B2；沿用旧配置字段，增强由 Pillow 实现，非 Paddle 原增强的逐像素复刻。
 batch_size: 4
 iters: 130000
 train_dataset:

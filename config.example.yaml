@@ -1,6 +1,6 @@
-# Paths are relative to this file. Use your existing PaddleSeg environment.
-model_config: /path/to/PaddleSeg/configs/root_segformer_b2.yml
-checkpoint: /path/to/best_model/model.pdparams
+# Paths are relative to this file. Use Python 3.11-3.13 with PyTorch.
+model_config: configs/root_segformer_b2.yml
+checkpoint: model/model.pt
 train_manifest: data/train.jsonl
 val_manifest: data/val.jsonl
 unlabeled_dir: data/unlabeled
@@ -20,3 +20,11 @@ max_pseudo_ratio: 1.0
 min_delta: 0.001
 auto_train: true
 auto_train_dice: 0.85
+agent_backend: deepagents  # legacy 可切回旧的单次 JSON 路由
+
+# 自然语言指令；Key 只从环境变量读取，不写入配置。
+qwen:
+  model: qwen3.8-flash
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  api_key_env: DASHSCOPE_API_KEY
+  timeout: 60

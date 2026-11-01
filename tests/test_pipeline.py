@@ -67,7 +67,7 @@ class Tests(unittest.TestCase):
             def fake_train(*args, **kwargs):
                 command = args[0]
                 job = json.loads(Path(command[-1]).read_text())
-                checkpoint = Path(job['output'])/'iter_1'/'model.pdparams'
+                checkpoint = Path(job['output'])/'iter_1'/'model.pt'
                 checkpoint.parent.mkdir(parents=True)
                 checkpoint.touch()
             with patch('root_self_train.backend.Predictor', Fake), patch('subprocess.run', fake_train):
