@@ -11,6 +11,7 @@ def read_pairs(manifest):
     path = Path(manifest).resolve()
     result = []
     for line in path.read_text(encoding='utf-8-sig').splitlines():
+        # JSONL 一行一个样本；utf-8-sig 同时兼容 Windows 工具可能写入的 BOM。
         if not line.strip():
             continue
         row = json.loads(line)
@@ -30,6 +31,7 @@ def validate(train, val, unlabeled):
     groups = []
     root_count = 0
     for name, pairs in [('train', train), ('val', val)]:
+        # train 和 val 分别收集原图哈希；比较图像内容，而非只比较文件名。
         hashes = set()
         for image, mask in pairs:
             with Image.open(image) as im, Image.open(mask) as m:
@@ -66,5 +68,6 @@ def write_json(path, value):
     """先写同目录临时文件再替换，降低中断时留下半份结果的风险。"""
     path = Path(path)
     tmp = path.with_suffix('.tmp')
+    # 禁止 NaN/Infinity 写进 JSON，使报告能被标准 JSON 工具稳定读取。
     tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
     tmp.replace(path)

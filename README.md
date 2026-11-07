@@ -63,11 +63,60 @@ Qwen 模型、兼容接口地址和 API Key 环境变量名可在 `qwen` 配置�
 `QWEN_MODEL`、`QWEN_BASE_URL` 可覆盖配置；地域须与 Key 匹配。
 
 Deep Agents 使用内存 StateBackend，不挂载本地文件或 shell，不启用 LangSmith 追踪。
-子智能体仅提交任务计划；本地结果、图片、权重不回传千问，因此尚非根据训练反馈反复自主规划的完整闭环。
+规划子智能体仅提交任务计划，不读取执行结果。启用 `vision.enabled` 后，评估阶段会另行发送抽样原图、掩膜和叠加图给千问视觉模型；不发送模型权重或人工标签。当前仍非根据训练反馈反复自主规划的完整闭环。
 复合任务由本地 Coordinator 按固定规则执行。`agent_backend: legacy` 可切回旧 JSON 路由。
 [Deep Agents 子智能体文档](https://docs.langchain.com/oss/python/deepagents/subagents)
 
 ## 数据准备
+
+## 新批次全自动质量筛查（不需要人工标签）
+
+```powershell
+python -m root_self_train assess config.yaml --input-dir "E:/data/new_roots" --output runs/quality_001
+```
+
+也可以在连续对话中输入：“自动分割并检查 E:/data/new_roots 的分割效果，不训练。”
+评估子智能体将提交 `assess`，不会使用原来的 50 张人工验证图，且无需训练/验证清单。
+请只提供原图目录，别把标签或旧预测掩膜混在里面；目前是重新分割后检查，不是导入任意现有掩膜评分。
+
+程序完成两次推理（原图、水平翻转）、根区域置信度、候选根区域不确定比例、翻转一致性、
+小连通域占比、根面积以及细窄区域稳定性检查。细窄像素按距离变换近似，包含粗根的边缘，
+不是骨架根长、断裂检测或真实细根召回率。连通域使用原图像素，阈值受分辨率影响。
+
+输出 `quality_report.html`（原图/叠加/风险图对照）、Markdown、JSON 和 CSV。
+`review_queue.json` 自动汇总可疑图片及规则触发证据，`random_sample.json` 单独保存固定种子的随机抽样。
+可疑样本选择用于定位问题，不能冒充整体准确率估计。原图不修改；输出文件按序号命名以避免同名覆盖。
+
+结论分为“通过自动筛查”“发现风险”“证据不足”；空根预测不判为通过，坏图片记录为检查失败，
+批次不会因部分图片失败而误报全部通过。阈值可在 `quality` 配置修改，默认规则未经你的新场景校准。
+**无真值不能给出真实 Dice/IoU 或证明正确**；高置信、稳定的预测也可能错误。
+因此报告不自动宣布精度达标，不伪造人工标签，也不根据这些启发式分数直接训练或发布模型。
+以上启发式检查在本地完成。当前配置另外启用了视觉复核，见下文。
+
+### 千问视觉评估与总体报告
+
+`assess` 及评估子智能体支持视觉复核，当前 `config.yaml` 和示例配置使用：
+
+```yaml
+vision:
+  enabled: true
+  model: qwen3.8-flash
+  max_images: 10
+  max_side: 1600
+```
+
+复用 `qwen.base_url`、`qwen.api_key_env`、`qwen.timeout` 和 `QWEN_BASE_URL`；视觉模型由 `vision.model` 单独指定，不受 `QWEN_MODEL` 覆盖。
+调用方式仍为上面的 `assess` 命令，或对话输入“用视觉模型评估这批图片的分割效果，生成总体报告，不训练”。
+程序先完成本地分割和筛查，再以固定种子随机抽样，每张发送原图、二值掩膜及叠加图，最大边默认缩至 1600 像素。
+这会向配置的远程接口上传图片并产生模型调用费用；设 `vision.enabled: false` 可仅执行本地检查，未配置 vision 的旧配置默认关闭视觉复核。
+
+新增 `vision_report.html`、`vision_report.md`、`vision_summary.json`、`vision_samples.json`，反馈总体观感、漏分、误分、细根、边界与连续性及逐图复核建议。
+报告显示总图片数、抽样数、成功数、失败数及覆盖范围；失败不会伪装为通过，本地筛查报告仍保留。
+视觉评估是主观判断，缩图可能隐藏细根，不能给出真实 Dice/IoU、替代人工真值或触发自动训练／模型晋级。
+`evaluate` 和 `auto` 中的人工验证集指标评估仍使用原来的数值流程。
+接口图像输入格式参见 [阿里云视觉理解文档](https://www.alibabacloud.com/help/en/model-studio/vision/)。
+
+## 人工标注数据准备
 
 仅分割不需要人工标签。评估需要验证集，训练需要训练和验证集，自动流程当前要求两者都有。
 缺少清单时显示如何准备数据及如何先仅分割，保持对话，不启动任务。

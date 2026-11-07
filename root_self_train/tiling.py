@@ -10,6 +10,7 @@ def slide_logits(chw, predict_tile, crop_size, stride):
         raise ValueError('Sliding stride must be positive and no larger than crop')
     _, height, width = chw.shape
     total = np.zeros((2, height, width), dtype=np.float32)
+    # total 累加两类分类分数；count 记录每个像素被多少个重叠窗口覆盖。
     count = np.zeros((height, width), dtype=np.float32)
     # 将末端窗口贴齐边缘，既覆盖非整除尺寸，也避免遗漏最后几行或列。
     for row in range(max(1, (max(height-ch, 0)+sh-1)//sh+1)):

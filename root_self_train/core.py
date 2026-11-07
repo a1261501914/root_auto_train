@@ -9,6 +9,7 @@ def counts(pred, target):
         raise ValueError('Prediction and mask shapes differ')
     valid = target != 255
     truth = target == 1
+    # TP=正确找到的根；FP=把背景当根；FN=漏掉的根。255 区域对三项都不贡献。
     return np.array([np.sum(pred & truth & valid),
                      np.sum(pred & ~truth & valid),
                      np.sum(~pred & truth & valid)], dtype=np.int64)
@@ -17,6 +18,7 @@ def counts(pred, target):
 def metrics(total):
     """由累计计数计算指标；预测和真值都无根时 Dice/IoU 约定为 1。"""
     tp, fp, fn = map(int, total)
+    # Dice/IoU 衡量重合度；Precision 看预测的根有多少是真的，Recall 看真根找回了多少。
     return dict(dice=2*tp/(2*tp+fp+fn) if 2*tp+fp+fn else 1.0,
                 iou=tp/(tp+fp+fn) if tp+fp+fn else 1.0,
                 precision=tp/(tp+fp) if tp+fp else 0.0,

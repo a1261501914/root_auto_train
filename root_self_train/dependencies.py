@@ -6,6 +6,7 @@ import sys
 
 
 PACKAGES = {
+    # 只为明确列出的依赖生成安装命令；未知缺失模块交给调用方处理。
     'numpy': 'numpy>=1.24,<3',
     'PIL': 'Pillow>=10',
     'yaml': 'PyYAML>=6',
@@ -26,6 +27,7 @@ def ensure_imports(modules, device='cpu'):
     attempted = set()
     packages = PACKAGES
     for module in modules:
+        # 导入失败才询问安装；安装成功后仅重试导入，不重跑已经完成的训练/推理。
         while True:
             try:
                 import_module(module)
@@ -45,6 +47,7 @@ def ensure_imports(modules, device='cpu'):
                         '请新建 Python 3.11–3.13 环境运行 PyTorch + Deep Agents；也可临时设置 agent_backend: legacy。'
                     ) from None
                 command = [sys.executable, '-m', 'pip', 'install', package]
+                # sys.executable 保证 pip 装到当前运行程序的 Python，而不是另一个环境。
                 if name == 'torch':
                     from .environment import reviewed_torch_command
                     command = reviewed_torch_command(device)
@@ -58,6 +61,7 @@ def ensure_imports(modules, device='cpu'):
                 except (EOFError, KeyboardInterrupt):
                     answer = ''
                 if answer not in {'y', 'yes', '是', '同意'}:
+                    # 默认拒绝：空输入、EOF 或中断都不能触发安装。
                     missing = {name}
                     for remaining in modules:
                         if remaining == module:

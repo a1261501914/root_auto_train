@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 
 class PlanInbox:
+    # 计划收件箱：子智能体的工具只登记计划，真正的本地任务要等规划结束后才执行。
     def __init__(self, instruction, cfg, history):
         self.instruction, self.cfg = instruction, cfg
         self.evidence = '\n'.join([m['content'] for m in history if m['role'] == 'user'] + [instruction])
@@ -24,6 +25,7 @@ class PlanInbox:
         if 'output' in plan['options'] and plan['options']['output'] not in self.instruction:
             raise ValueError('输出目录须在本轮明确提供')
         with self.lock:
+            # 多个子智能体可能提交结果；锁保证本轮不会登记两个相互冲突的执行计划。
             if self.plan is not None and self.plan != plan:
                 raise ValueError('本轮已提交任务，不能提交冲突任务；复合流程使用 auto')
             self.plan = plan
@@ -31,12 +33,14 @@ class PlanInbox:
 
 
 def build_graph(model, inbox):
+    # 构建主控和三类规划子智能体；它们与 specialists.py 的本地执行对象职责不同。
     from deepagents import create_deep_agent
     from deepagents.backends import StateBackend
     from langchain_core.tools import tool
     from .agent import SYSTEM
 
     def make_tool(name, actions):
+        # 闭包把各角色允许的 action 固定下来，例如分割角色只能提交 predict。
         @tool(name)
         def submit_task(action: str, message: str, options: dict) -> str:
             """Submit one structured task plan. This does not execute or evaluate a model."""
@@ -44,12 +48,12 @@ def build_graph(model, inbox):
         return submit_task
 
     roles = [('segmentation', '根系分割任务规划，只负责 predict。', {'predict'}),
-             ('evaluation', '人工验证集评估和数据检查任务规划。', {'evaluate', 'check'}),
+             ('evaluation', '新批次无标签质量筛查 assess、人工验证集 evaluate 和数据检查。', {'assess', 'evaluate', 'check'}),
              ('training', '有预算的自训练或分割评估训练复合流程规划。', {'run', 'auto'})]
     budget = json.dumps({k: inbox.cfg[k] for k in ('rounds', 'iters', 'auto_train_dice')})
     prompt = SYSTEM + '\n配置预算：' + budget + '''
 这是 Deep Agents 调度会话。用提交工具登记任务，不能仅返回任务 JSON。
-只说处理图片、未要求评估或训练时，默认仅分割。复合流程由 training 提交 auto，
+只说处理图片、未要求评估或训练时，默认仅分割。新批次分割并质检由 evaluation 提交 assess；需要训练的复合流程由 training 提交 auto，
 不要同时提交多个单项任务。所有提交仅代表计划，不代表执行成功。
 '''
     subagents = [dict(name=name, description=description, model=model,
@@ -57,6 +61,7 @@ def build_graph(model, inbox):
                       tools=[make_tool('submit_' + name, actions)])
                  for name, description, actions in roles]
     return create_deep_agent(
+        # StateBackend 使用内存状态，不把本地目录或 shell 作为规划模型的工具。
         model=model, backend=StateBackend(),
         system_prompt=prompt + '''
 你是主控。执行类请求必须通过 task 委派 segmentation/evaluation/training，
@@ -66,6 +71,7 @@ action 为 reply 或 clarify，options={}。不要自行读取本地文件或运
 
 
 def request_deep_plan(instruction, cfg, history=None):
+    # 按需导入，直接使用本地分割命令时无需先加载整个智能体框架。
     from .dependencies import ensure_imports
     ensure_imports(('deepagents', 'langchain_openai'))
     try:
@@ -93,6 +99,7 @@ def request_deep_plan(instruction, cfg, history=None):
     graph = build_graph(model, inbox)
     try:
         with tracing_context(enabled=False):
+            # 关闭追踪；recursion_limit 限制委派调用深度，避免规划无限循环。
             graph.invoke({'messages': history + [{'role': 'user', 'content': instruction}]},
                          config={'recursion_limit': 32})
     except Exception:

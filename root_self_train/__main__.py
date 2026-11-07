@@ -17,11 +17,15 @@ from PIL import Image
 from .core import counts, metrics, select
 from .data import read_pairs, validate, write_json, digest
 
+# 阅读导航：main() 分发命令；load() 读取配置；run() 管自训练；auto() 管组合任务。
+# 实际神经网络计算放在 backend.py，这里主要负责把各个步骤串起来。
+
 
 def load(path):
     """解析配置、统一绝对路径，并在启动训练前检查关键参数范围。"""
     path = Path(path).resolve()
     cfg = yaml.safe_load(path.read_text(encoding='utf-8'))
+    # cfg 是贯穿流程的配置字典。路径相对于配置文件，而非相对于启动命令所在目录。
     cfg.setdefault('auto_train', True)
     cfg.setdefault('auto_train_dice', .85)
     for key in ('model_config', 'checkpoint', 'train_manifest', 'val_manifest', 'unlabeled_dir', 'workdir'):
@@ -59,6 +63,7 @@ def evaluate(predictor, pairs):
 
 def evaluate_detailed(predictor, pairs, threshold=.5):
     """Return global metrics plus per-image metrics for an auditable report."""
+    # pairs 为人工图像/标签对。全局指标先累计像素计数再计算，不平均每张图片的分数。
     total = np.zeros(3, dtype=np.int64)
     rows = []
     for image, mask in pairs:
@@ -87,6 +92,7 @@ def predict_directory(predictor, images, output):
         folder.mkdir()
     rows = []
     for image in images:
+        # 概率图适合看置信程度；二值掩膜适合后续处理；叠加图和缩略图用于人工查看。
         with Image.open(image) as source:
             rgb = np.asarray(source.convert('RGB'))
         prob = predictor.predict(image)
@@ -133,6 +139,7 @@ def promoted(candidate, teacher, delta):
 
 def run(cfg, check=False, workdir=None):
     """执行有限轮自训练；检查模式完成数据校验后立即返回，不加载模型。"""
+    # 第 1 步：准备三组数据。训练标签用于学习，验证标签用于模型选择，未标注图用于伪标签。
     train, val = read_pairs(cfg['train_manifest']), read_pairs(cfg['val_manifest'])
     unlabeled = sorted(p.resolve() for p in Path(cfg['unlabeled_dir']).rglob('*')
                        if p.suffix.lower() in {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp'})
@@ -158,12 +165,14 @@ def run(cfg, check=False, workdir=None):
     write_json(work / 'input_hashes.json', {str(p): digest(p) for pair in train+val for p in pair} |
                {str(p): digest(p) for p in unlabeled} | {cfg['checkpoint']: digest(cfg['checkpoint'])})
     teacher = cfg['checkpoint']
+    # Teacher 不是另一种网络，而是“当前保留的权重”；Student 是从它微调得到的候选权重。
     predictor = Predictor(cfg['model_config'], teacher, cfg['device'])
     # 先用相同验证流程建立 Teacher 基线，后续学生均与保留模型比较。
     score = evaluate(predictor, val)
     history = []
     write_json(work / 'best.json', dict(checkpoint=teacher, metrics=score, round=0))
     for r in range(1, cfg['rounds']+1):
+        # 第 2 步：当前 Teacher 做原图/翻转两次推理，筛选可靠伪标签。
         folder = work / f'round_{r:02d}'
         folder.mkdir()
         pseudo = folder / 'pseudo'
@@ -189,6 +198,7 @@ def run(cfg, check=False, workdir=None):
             write_json(folder / 'result.json', dict(status='stopped_no_pseudo_labels'))
             break
         manifest = folder / 'train.txt'
+        # 第 3 步：人工样本 + 本轮通过筛选的伪标签样本，组成 Student 的训练数据。
         # 每轮重新生成伪标签，不累加旧轮标签；人工样本始终保留。
         pairs = train + accepted
         if any('\t' in str(p) or '\n' in str(p) for pair in pairs for p in pair):
@@ -212,6 +222,7 @@ def run(cfg, check=False, workdir=None):
             write_json(folder / 'result.json', dict(status='training_failed', retained_teacher=str(teacher)))
             raise
         candidate = folder / 'student' / f"iter_{cfg['iters']}" / 'model.pt'
+        # 第 4 步：使用同一份人工验证集比较新旧权重，避免用模型自己的伪标签为自己打分。
         predictor = Predictor(cfg['model_config'], candidate, cfg['device'])
         new_score = evaluate(predictor, val)
         promote = promoted(new_score, score, cfg['min_delta'])
@@ -241,7 +252,7 @@ def auto(cfg):
 def main():
     """check 只检查数据，run 启动闭环，worker 是内部单轮训练入口。"""
     parser = argparse.ArgumentParser(description='Root segmentation automatic prediction and self-training')
-    parser.add_argument('command', choices=['check', 'predict', 'evaluate', 'auto', 'run', 'worker', 'ask'])
+    parser.add_argument('command', choices=['check', 'predict', 'assess', 'evaluate', 'auto', 'run', 'worker', 'ask'])
     parser.add_argument('config')
     parser.add_argument('instruction', nargs='?', help='ask 的自然语言指令；省略时进入连续对话')
     parser.add_argument('--dry-run', action='store_true', help='ask 只解析并显示计划，不加载分割模型')
@@ -249,6 +260,7 @@ def main():
     parser.add_argument('--output', help='output directory; must not already exist')
     parser.add_argument('--threshold', type=float, default=.5)
     args = parser.parse_args()
+    # ask 先走自然语言规划；其他命令直接调用本地业务，不需要让 LLM 决定做什么。
     if args.command != 'ask' and (args.instruction is not None or args.dry_run):
         parser.error('instruction 和 --dry-run 仅适用于 ask')
     if args.command == 'ask':
@@ -264,6 +276,7 @@ def main():
             parser.exit(1, f'任务失败：{exc}\n')
         return
     if args.command == 'worker':
+        # 内部训练子进程入口：这里的 config 参数实际上是上层生成的 job.json 文件路径。
         import json
         from .backend import train
         job = json.loads(Path(args.config).read_text(encoding='utf-8'))
@@ -271,6 +284,23 @@ def main():
         train(cfg['model_config'], job['teacher'], job['output'], job['manifest'], cfg)
     else:
         cfg = load(args.config)
+        if args.command == 'assess':
+            # 新批次评估：不读取人工验证标签；quality.py 负责筛查并按配置调用视觉复核。
+            from .quality import assess
+            if args.threshold != .5:
+                parser.error('assess 使用固定二值阈值 0.5；质量阈值在 quality 配置中设置')
+            if args.input_dir:
+                cfg['unlabeled_dir'] = str(Path(args.input_dir).resolve())
+                cfg.pop('unlabeled_manifest', None)
+            if args.output:
+                cfg['workdir'] = str(Path(args.output).resolve())
+            try:
+                summary = assess(cfg)
+            except (ValueError, RuntimeError, OSError) as exc:
+                parser.exit(1, f'质量检查未完成：{exc}\n')
+            print(summary['conclusion'] + '：' + summary['limitation'])
+            print('报告：' + summary['report'])
+            return
         if args.command == 'check':
             run(cfg, check=True)
             return
@@ -278,6 +308,7 @@ def main():
             auto(cfg)
             return
         if args.command in ('predict', 'evaluate'):
+            # evaluate 与 assess 含义不同：前者有人工真值，可算真实的分割重合指标。
             from .backend import Predictor
             if not 0 < args.threshold < 1:
                 raise ValueError('--threshold must be between 0 and 1')

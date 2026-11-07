@@ -15,6 +15,7 @@ def probe(command):
 
 
 def inspect_environment():
+    # 只读采集 Python、系统、已安装包和 NVIDIA 驱动信息，不安装驱动或修改设备设置。
     packages = {}
     for name in ('pip', 'numpy', 'torch'):
         try:
@@ -27,6 +28,7 @@ def inspect_environment():
 
 
 def torch_plan(env, device):
+    # 返回安装建议而非直接执行；存在 blockers 时 command 留空，避免盲目重复安装。
     issues = []
     gpu = str(device).startswith(('gpu', 'cuda'))
     if env['system'] not in {'Windows', 'Linux'} or env['bits'] != 64 or env['machine'].lower() not in {'amd64', 'x86_64', 'x64'}:
@@ -40,6 +42,7 @@ def torch_plan(env, device):
     if not gpu and device != 'cpu':
         issues.append('设备应为 cpu 或 gpu/cuda。')
     index = 'cu128' if gpu else 'cpu'
+    # 这里选择 PyTorch 自带运行时的 wheel 源，不代表本机已经满足 GPU 运行条件。
     return dict(environment=env, device=device, blockers=issues,
                 command=[] if issues else [sys.executable, '-m', 'pip', 'install', 'torch==2.8.0', '--index-url', 'https://download.pytorch.org/whl/' + index],
                 reason='官方 CPU/CUDA 12.8 wheel；安装后仍需检测设备是否可用，不安装驱动或 CUDA Toolkit。')
