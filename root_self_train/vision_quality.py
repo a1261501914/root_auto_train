@@ -3,6 +3,7 @@ import base64
 import html
 import io
 import json
+import math
 import os
 import random
 from collections import Counter
@@ -14,6 +15,9 @@ from urllib.request import Request, urlopen
 from PIL import Image
 from .data import write_json
 
+# 分数是视觉主观量表，不是真实像素准确率。总分由程序加权，避免模型自行决定公式。
+SCORE_WEIGHTS = dict(completeness=.35, purity=.30, thin_roots=.20, boundaries=.15)
+
 LIMITATION = '视觉模型主观复核，无人工真值，不能计算真实 Dice/IoU 或证明准确率达标；缩略图可能隐藏细根，抽样结论不能外推全部图片。'
 # PROMPT 是视觉评估规则，不是规划模型的指令；明确三张图的含义和需要返回的结构。
 PROMPT = '''你是植物根系分割视觉评估员。依次查看原图、二值掩膜（白色为预测根系）、红色半透明叠加图。
@@ -23,25 +27,59 @@ PROMPT = '''你是植物根系分割视觉评估员。依次查看原图、二�
 只输出 JSON，包含且仅包含：
 {"verdict":"good|risk|uncertain","summary":"整体观感与依据",
 "missed_roots":"漏分观察","false_positives":"误分观察","thin_roots":"细根观察",
-"boundaries":"边界与连续性观察","suggestions":["建议人工复核的区域或下一步"]}。
+"boundaries":"边界与连续性观察","suggestions":["建议人工复核的区域或下一步"],
+"scores":{"completeness":0,"purity":0,"thin_roots":0,"boundaries":0}}。
+scores 是 0 到 100 的主观质量分（越高越好），分别评价根系覆盖完整性、背景排除、细根保留、边界与连续性。
+统一锚点：90-100 未见明显缺陷；75-89 轻微局部缺陷；50-74 明显缺陷；1-49 严重缺陷；0 明确完全失败。
+只根据可见证据评分；不能确认目标、图像模糊或某项无法评估时 verdict=uncertain，scores 的四项全部为 null。
+明确可见根系而掩膜全空时应判 risk 并给低分；不能确定原图是否有根系时不要强行打零分。
 good 只表示当前分辨率下未见明显问题，不代表准确率合格。'''
 
 
 def settings(cfg):
     # 旧配置缺少 vision 时默认关闭；独立配置模型名，避免规划模型切换时影响视觉模型。
     custom = cfg.get('vision', {})
-    if not isinstance(custom, dict) or set(custom) - {'enabled', 'model', 'max_images', 'max_side'}:
+    if not isinstance(custom, dict) or set(custom) - {'enabled', 'model', 'max_images', 'max_side', 'score_threshold', 'min_scored'}:
         raise ValueError('vision 配置包含未知字段')
-    result = dict(enabled=False, model='qwen3.8-flash', max_images=10, max_side=1600)
+    result = dict(enabled=False, model='qwen3.8-flash', max_images=10, max_side=1600, score_threshold=80, min_scored=3)
     result.update(custom)
     if type(result['enabled']) is not bool:
         raise ValueError('vision.enabled 必须为布尔值')
-    for name, maximum in [('max_images', 100), ('max_side', 2048)]:
+    for name, maximum in [('max_images', 100), ('max_side', 2048), ('min_scored', 100)]:
         if type(result[name]) is not int or not 1 <= result[name] <= maximum:
             raise ValueError(f'vision.{name} 必须为 1 到 {maximum} 的整数')
     if not isinstance(result['model'], str) or not result['model'].strip():
         raise ValueError('vision.model 不能为空')
+    threshold = result['score_threshold']
+    if type(threshold) not in (int, float) or not math.isfinite(threshold) or not 0 <= threshold <= 100:
+        raise ValueError('vision.score_threshold 必须在 0 到 100 之间')
     return result
+
+
+def quality_score(review):
+    """校验模型四项打分；uncertain 没有有效分数，不能被当作零分触发训练。"""
+    scores = review.get('scores')
+    if not isinstance(scores, dict) or set(scores) != set(SCORE_WEIGHTS):
+        raise ValueError('缺少四项视觉分数')
+    if review['verdict'] == 'uncertain':
+        if any(value is not None for value in scores.values()):
+            raise ValueError('不确定样本分数必须全部为 null')
+        return None
+    if any(type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 100 for value in scores.values()):
+        raise ValueError('视觉分数必须为 0 到 100 的有限数')
+    return round(sum(scores[key]*weight for key, weight in SCORE_WEIGHTS.items()), 2)
+
+
+def score_batch(reviews, total, local_complete, options):
+    scored = [item['score'] for item in reviews if item['status'] == 'completed' and item['score'] is not None]
+    mean = round(sum(scored)/len(scored), 2) if scored else None
+    # 任何调用失败、无法判断或本地图像失败都不能被当作“低分”自动训练。
+    ready = bool(reviews) and local_complete and len(scored) == len(reviews) and len(scored) >= min(total, options['min_scored'])
+    decision = ('insufficient_evidence' if not ready else
+                'below_threshold' if mean < options['score_threshold'] else 'meets_threshold')
+    return dict(mean_score=mean, scored=len(scored), minimum_required=min(total, options['min_scored']),
+                threshold=options['score_threshold'], weights=SCORE_WEIGHTS, decision=decision,
+                training_recommended=decision == 'below_threshold')
 
 
 def image_url(path, max_side, mask=False):
@@ -93,15 +131,16 @@ def review_image(cfg, output, row, options):
         if choice.get('finish_reason') != 'stop':
             raise ValueError()
         review = json.loads(choice['message']['content'])
-        fields = {'verdict', 'summary', 'missed_roots', 'false_positives', 'thin_roots', 'boundaries', 'suggestions'}
+        fields = {'verdict', 'summary', 'missed_roots', 'false_positives', 'thin_roots', 'boundaries', 'suggestions', 'scores'}
         if not isinstance(review, dict) or set(review) != fields or review['verdict'] not in ('good', 'risk', 'uncertain'):
             raise ValueError()
         if any(not isinstance(review[k], str) or not review[k].strip() or len(review[k]) > 3000
-               for k in fields - {'suggestions'}):
+               for k in fields - {'suggestions', 'scores'}):
             raise ValueError()
         if not isinstance(review['suggestions'], list) or len(review['suggestions']) > 20 or any(
                 not isinstance(s, str) or len(s) > 3000 for s in review['suggestions']):
             raise ValueError()
+        quality_score(review)
         return review
     except (KeyError, IndexError, TypeError, ValueError):
         raise RuntimeError('视觉模型返回不完整或不符合约定的评估 JSON') from None
@@ -122,7 +161,8 @@ def assess_visual(cfg, rows, local_summary):
         print(f'[视觉复核] {number}/{len(selected)}', flush=True)
         item = dict(index=index, image=row['image'], preview=row['preview'], overlay=row['overlay'])
         try:
-            item.update(status='completed', review=review_image(cfg, output, row, options))
+            review = review_image(cfg, output, row, options)
+            item.update(status='completed', review=review, score=quality_score(review))
         except (RuntimeError, ValueError, OSError) as exc:
             # 单张远程失败不终止整个批次，报告必须区分“未评估”和“未见风险”。
             item.update(status='error', error=str(exc))
@@ -132,15 +172,22 @@ def assess_visual(cfg, rows, local_summary):
     counts = Counter(item['review']['verdict'] if item['status'] == 'completed' else 'error' for item in reviews)
     # good/risk/uncertain 是主观类别而非准确率；存在 risk 优先报风险，否则检查证据完整性。
     completed = sum(item['status'] == 'completed' for item in reviews)
+    scoring = score_batch(reviews, len(rows), local_summary['complete'], options)
     conclusion = ('发现视觉分割风险，建议优先人工复核' if counts['risk'] else
                   '证据不足，视觉复核未完整完成或存在不确定判断' if not selected or counts['error'] or counts['uncertain'] or local_summary['counts'].get('error') else
                   '已复核样本未见明显分割问题，仍需人工验证')
+    if scoring['decision'] == 'below_threshold':
+        conclusion = f'视觉主观质量分 {scoring["mean_score"]}，低于阈值 {scoring["threshold"]}，建议进入训练流程'
+    elif scoring['decision'] == 'insufficient_evidence':
+        conclusion += '；评分证据不足，不自动触发训练'
     summary = dict(model=options['model'], total=len(rows), eligible=len(eligible), selected=len(selected),
-                   reviewed=completed, counts=dict(counts), selection='固定种子随机抽样', max_side=options['max_side'],
+                   reviewed=completed, counts=dict(counts), scoring=scoring, selection='固定种子随机抽样', max_side=options['max_side'],
                    complete=bool(selected) and completed == len(selected) and local_summary['complete'],
                    full_coverage=completed == len(rows) and bool(rows), conclusion=conclusion, limitation=LIMITATION,
                    report=str(output/'vision_report.html'), markdown_report=str(output/'vision_report.md'))
     lines = ['# 分割效果总体报告', '', conclusion, '', LIMITATION, '',
+             f'视觉主观总分：{scoring["mean_score"]} / 100；阈值：{scoring["threshold"]}；有效评分数：{scoring["scored"]}；决策：{scoring["decision"]}。',
+             '总分 = 完整性×35% + 背景排除×30% + 细根保留×20% + 边界连续性×15%；批次分为有效样本总分的平均值。阈值尚未经场景校准。',
              f'模型：{options["model"]}；批次 {len(rows)} 张，可复核 {len(eligible)} 张，抽样 {len(selected)} 张，成功 {completed} 张。',
              f'抽样方式：固定种子随机抽样；最大边 {options["max_side"]} 像素。',
              f'视觉判断统计（仅成功复核样本及失败数）：{dict(counts)}',
@@ -153,6 +200,7 @@ def assess_visual(cfg, rows, local_summary):
             lines += ['复核失败：'+item['error'], '']
         else:
             review = item['review']
+            lines += [f'视觉主观分：{item["score"]}；四项分数：{review["scores"]}']
             lines += [f'视觉判断：{review["verdict"]}', review['summary']]
             for key, label in [('missed_roots', '漏分'), ('false_positives', '误分'), ('thin_roots', '细根'), ('boundaries', '边界与连续性')]:
                 lines.append(label+'：'+review[key])

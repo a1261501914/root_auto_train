@@ -252,7 +252,7 @@ def auto(cfg):
 def main():
     """check 只检查数据，run 启动闭环，worker 是内部单轮训练入口。"""
     parser = argparse.ArgumentParser(description='Root segmentation automatic prediction and self-training')
-    parser.add_argument('command', choices=['check', 'predict', 'assess', 'evaluate', 'auto', 'run', 'worker', 'ask'])
+    parser.add_argument('command', choices=['check', 'predict', 'assess', 'adapt', 'evaluate', 'auto', 'run', 'worker', 'ask'])
     parser.add_argument('config')
     parser.add_argument('instruction', nargs='?', help='ask 的自然语言指令；省略时进入连续对话')
     parser.add_argument('--dry-run', action='store_true', help='ask 只解析并显示计划，不加载分割模型')
@@ -284,7 +284,7 @@ def main():
         train(cfg['model_config'], job['teacher'], job['output'], job['manifest'], cfg)
     else:
         cfg = load(args.config)
-        if args.command == 'assess':
+        if args.command in ('assess', 'adapt'):
             # 新批次评估：不读取人工验证标签；quality.py 负责筛查并按配置调用视觉复核。
             from .quality import assess
             if args.threshold != .5:
@@ -295,6 +295,10 @@ def main():
             if args.output:
                 cfg['workdir'] = str(Path(args.output).resolve())
             try:
+                if args.command == 'adapt':
+                    from .adaptation import adapt
+                    adapt(cfg)
+                    return
                 summary = assess(cfg)
             except (ValueError, RuntimeError, OSError) as exc:
                 parser.exit(1, f'质量检查未完成：{exc}\n')

@@ -28,6 +28,8 @@ vision:
   model: qwen3.8-flash
   max_images: 10
   max_side: 1600
+  score_threshold: 80  # 主观量表，尚需场景校准；严格低于才建议训练
+  min_scored: 3       # 小批次不足 3 张时要求全部有效评分
 
 # 无标签新批次筛查阈值；未校准的启发式规则，不是准确率验收线。
 quality:

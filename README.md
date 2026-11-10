@@ -103,6 +103,8 @@ vision:
   model: qwen3.8-flash
   max_images: 10
   max_side: 1600
+  score_threshold: 80
+  min_scored: 3
 ```
 
 复用 `qwen.base_url`、`qwen.api_key_env`、`qwen.timeout` 和 `QWEN_BASE_URL`；视觉模型由 `vision.model` 单独指定，不受 `QWEN_MODEL` 覆盖。
@@ -112,9 +114,32 @@ vision:
 
 新增 `vision_report.html`、`vision_report.md`、`vision_summary.json`、`vision_samples.json`，反馈总体观感、漏分、误分、细根、边界与连续性及逐图复核建议。
 报告显示总图片数、抽样数、成功数、失败数及覆盖范围；失败不会伪装为通过，本地筛查报告仍保留。
-视觉评估是主观判断，缩图可能隐藏细根，不能给出真实 Dice/IoU、替代人工真值或触发自动训练／模型晋级。
+视觉评估是主观判断，缩图可能隐藏细根，不能给出真实 Dice/IoU 或替代人工真值。`assess` 只报告分数，不训练；`adapt` 可按分数触发训练，但权重晋级仍依赖人工验证集。
 `evaluate` 和 `auto` 中的人工验证集指标评估仍使用原来的数值流程。
 接口图像输入格式参见 [阿里云视觉理解文档](https://www.alibabacloud.com/help/en/model-studio/vision/)。
+
+### 视觉分数低于阈值时自动训练
+
+```powershell
+python -m root_self_train adapt config.yaml --input-dir "E:/data/new_roots" --output runs/adapt_001
+```
+
+对话也可以输入：“对 E:/data/new_roots 做视觉评分，低于配置阈值时自动训练。”规划将使用 `adapt` 并明确 `auto_train: true`。
+直接命令使用配置的 `auto_train` 开关和 `rounds/iters` 预算；`assess` 和原来的 `auto` 行为保持原用途。
+
+每图四项主观分范围 0–100：完整性 35%、背景排除 30%、细根保留 20%、边界连续性 15%。
+程序计算每图加权总分及批次有效样本的平均分，严格低于 `vision.score_threshold`（默认 80）才建议训练；等于阈值不触发。
+模型按固定量表评分：90–100 未见明显缺陷，75–89 轻微缺陷，50–74 明显缺陷，低于 50 严重缺陷。
+这些分数不是准确率，80 只是未校准的初始设置，应用前应结合人工复核校准。
+
+所有抽样必须成功且可评分，本地检查完整，并至少有 `min_scored` 张有效样本，才自动触发。
+整批不足该数量时要求整批均可评分；抽样数低于要求时报告证据不足。不确定样本返回 null，不计为零分；网络失败也不计为零分。
+
+流程为：`baseline/` 分割与视觉评分 → 低分且允许训练 → `training/` 严格筛选伪标签并训练 → `final/` 对相同批次和固定种子复评。
+训练仍需真实人工训练/验证清单，且数据不能与待处理批次重复；缺少清单时保存 `needs_setup` 反馈，不伪造标签。
+低分不代表旧掩膜可靠，训练沿用现有置信度和一致性筛选；没有合格伪标签时保留原模型。
+一次 adapt 最多执行一次配置预算内的自训练流程，不无限训练；新权重只有人工验证 Dice 严格提升才晋级。
+`adapt_summary.json` 和 `adapt_report.md` 记录触发原因、训练状态、前后分数和报告位置。
 
 ## 人工标注数据准备
 

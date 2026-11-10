@@ -5,14 +5,29 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from PIL import Image
-from root_self_train.vision_quality import settings, review_image, assess_visual
+from root_self_train.vision_quality import settings, review_image, assess_visual, quality_score, score_batch
 
 
 REVIEW = dict(verdict='risk', summary='右侧可见疑似漏分', missed_roots='右侧细根',
-              false_positives='未见明显误分', thin_roots='局部不清楚', boundaries='需复核', suggestions=['核对右侧'])
+              false_positives='未见明显误分', thin_roots='局部不清楚', boundaries='需复核', suggestions=['核对右侧'],
+              scores=dict(completeness=50, purity=90, thin_roots=40, boundaries=60))
 
 
 class VisionTests(unittest.TestCase):
+    def test_scores_and_strict_threshold_boundary(self):
+        self.assertEqual(quality_score(REVIEW), 61.5)
+        options = settings({})
+        for value, expected in [(79.99, 'below_threshold'), (80, 'meets_threshold')]:
+            rows = [dict(status='completed', score=value)]*3
+            self.assertEqual(score_batch(rows, 100, True, options)['decision'], expected)
+        self.assertEqual(score_batch([dict(status='completed', score=10)], 100, True, options)['decision'], 'insufficient_evidence')
+        self.assertFalse(score_batch([dict(status='completed', score=None)], 1, True, options)['training_recommended'])
+        self.assertFalse(score_batch([dict(status='completed', score=10)], 1, False, options)['training_recommended'])
+        self.assertIsNone(quality_score(dict(REVIEW, verdict='uncertain', scores={k: None for k in REVIEW['scores']})))
+        for invalid in (True, float('nan'), -1, 101):
+            with self.assertRaises(ValueError):
+                quality_score(dict(REVIEW, scores=dict(REVIEW['scores'], purity=invalid)))
+
     def test_configuration_validation(self):
         self.assertFalse(settings({})['enabled'])
         for value in ({'enabled': 'true'}, {'max_images': 0}, {'max_side': 9000}, {'model': ''}):
